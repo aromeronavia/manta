@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>manta-map</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="topbar">
+  <div class="brand">manta-map <span id="match-title" class="muted"></span></div>
+  <div id="match-summary" class="muted"></div>
+</header>
+
+<div id="layout">
+  <section id="map-pane">
+    <div id="map-wrap">
+      <canvas id="map"></canvas>
+      <div id="hud">
+        <div class="heroes radiant" id="hud-heroes-radiant"></div>
+        <div class="score radiant" title="Radiant kills"><span id="hud-radiant">0</span></div>
+        <div class="center" title="game clock · day/night">
+          <div class="daynight" id="hud-daynight"><span class="dial" id="hud-dial"></span><span class="glyph" id="hud-glyph">☀</span></div>
+          <div class="time" id="hud-clock">0:00</div>
+        </div>
+        <div class="score dire" title="Dire kills"><span id="hud-dire">0</span></div>
+        <div class="heroes dire" id="hud-heroes-dire"></div>
+      </div>
+      <div id="alerts"></div>
+      <div id="kill-alerts"></div>
+      <div id="map-tooltip" hidden></div>
+    </div>
+  </section>
+
+  <aside id="side">
+    <div id="panel-tabs">
+      <button type="button" data-panel="score" class="active">Scoreboard</button>
+      <button type="button" data-panel="farm">Farming</button>
+      <button type="button" data-panel="item">Itemization</button>
+      <button type="button" data-panel="feed">Feed</button>
+    </div>
+    <div id="chart-tooltip" hidden></div>
+    <div id="panel-score" class="panel">
+      <div id="score-tables"></div>
+      <div class="chart-block">
+        <div class="chart-title">Net worth advantage <span class="muted">Radiant − Dire, gold</span></div>
+        <canvas id="chart-gold" class="chart"></canvas>
+      </div>
+      <div class="chart-block">
+        <div class="chart-title">Experience advantage <span class="muted">Radiant − Dire, XP</span></div>
+        <canvas id="chart-xp" class="chart"></canvas>
+      </div>
+      <p class="muted small">Above the zero line Radiant leads, below it Dire leads. Click a chart to seek.</p>
+    </div>
+    <div id="panel-farm" class="panel" hidden>
+      <div id="farm-heroes" class="hero-picker"></div>
+      <div class="farm-head">
+        <div id="farm-title"></div>
+        <label class="muted small"><input type="checkbox" id="farm-heat" checked> heatmap on map</label>
+      </div>
+      <div id="farm-tiles" class="tiles"></div>
+      <div class="chart-block">
+        <div class="chart-title">Where the farm came from <span class="muted">creep kills up to the playhead</span></div>
+        <div id="farm-split" class="split"></div>
+        <div id="farm-split-legend" class="legend"></div>
+      </div>
+      <div class="chart-block">
+        <div class="chart-title">Creep score per minute</div>
+        <canvas id="chart-cs" class="chart"></canvas>
+        <div id="legend-cs" class="legend"></div>
+      </div>
+      <div class="chart-block">
+        <div class="chart-title">Gold and experience per minute</div>
+        <canvas id="chart-gpm" class="chart"></canvas>
+        <div id="legend-gpm" class="legend"></div>
+      </div>
+      <div class="chart-block">
+        <div class="chart-title">Gold by source <span class="muted">cumulative</span></div>
+        <canvas id="chart-gold-src" class="chart"></canvas>
+        <div id="legend-gold-src" class="legend"></div>
+      </div>
+      <div class="chart-block">
+        <div class="chart-title">Item timings <span class="muted">consumables and recipes hidden</span></div>
+        <div id="farm-items" class="item-strip"></div>
+        <ol id="farm-item-list" class="item-list"></ol>
+      </div>
+      <div class="chart-block">
+        <div class="chart-title">Compared with the other nine <span class="muted">at the playhead</span></div>
+        <table id="farm-compare" class="score"></table>
+      </div>
+      <p class="muted small">Lane and jungle are inferred from where the hero stood at each creep kill; GPM and XPM count from the horn. Farm uptime is the share of time alive with creep or neutral gold earned in the previous 30 seconds.</p>
+    </div>
+    <div id="panel-item" class="panel" hidden>
+      <div id="item-heroes" class="hero-picker"></div>
+      <div class="farm-head"><div id="item-title"></div></div>
+      <div class="chart-block" id="farm-ref">
+        <div class="chart-title">Against OpenDota <span class="muted" id="farm-ref-note">loading…</span></div>
+        <div id="farm-bench"></div>
+        <div class="sub-title">Build vs professional builds <span class="muted">phases as OpenDota defines them</span></div>
+        <div id="farm-phases" class="phases"></div>
+        <div class="sub-title">Core item timings <span class="muted">games and win rate by purchase time on this hero</span></div>
+        <div id="farm-timings"></div>
+      </div>
+      <p class="muted small">Benchmarks are percentiles of this hero's per-minute rates across recent OpenDota matches. Build phases and timing buckets follow OpenDota's definitions; popular items come from professional matches.</p>
+    </div>
+    <div id="panel-feed" class="panel" hidden><ol id="feed"></ol></div>
+  </aside>
+</div>
+
+<footer id="controls">
+  <div class="row">
+    <button id="btn-play" type="button" title="space">▶</button>
+    <button id="btn-horn" type="button" title="jump to the horn (0:00)">0:00</button>
+    <select id="speed" title="playback speed">
+      <option value="1">1×</option><option value="2">2×</option><option value="4" selected>4×</option>
+      <option value="8">8×</option><option value="16">16×</option><option value="32">32×</option>
+    </select>
+    <div id="clock" class="mono">–:––</div>
+    <canvas id="timeline"></canvas>
+    <div id="tick" class="mono muted"></div>
+  </div>
+  <div class="row layers" id="layers">
+    <label><input type="checkbox" data-layer="heroes" checked> heroes</label>
+    <label><input type="checkbox" data-layer="names" checked> names</label>
+    <label><input type="checkbox" data-layer="trails" checked> trails</label>
+    <select id="trail-seconds" title="trail length">
+      <option value="5">5 s</option><option value="15" selected>15 s</option><option value="30">30 s</option><option value="60">60 s</option>
+    </select>
+    <label><input type="checkbox" data-layer="kills" checked> kills</label>
+    <label><input type="checkbox" data-layer="buildings" checked> buildings</label>
+    <label><input type="checkbox" data-layer="couriers" checked> couriers</label>
+    <label><input type="checkbox" data-layer="roshan" checked> Roshan</label>
+    <label><input type="checkbox" data-layer="wards" checked> wards</label>
+    <label><input type="checkbox" data-layer="alerts" checked> alerts</label>
+    <span id="status" class="muted"></span>
+  </div>
+</footer>
+<script src="app.js"></script>
+</body>
+</html>

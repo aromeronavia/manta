@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>manta-explorer</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header id="topbar">
+  <div class="brand">manta-explorer <span id="file-name" class="muted"></span></div>
+  <div id="match-summary" class="muted"></div>
+</header>
+
+<div id="layout">
+  <nav id="sidebar">
+    <div id="stream-tabs"></div>
+    <div id="picker">
+      <div class="picker-head">
+        <input id="picker-search" type="search" placeholder="filter list…" autocomplete="off">
+        <button id="picker-all" type="button" title="select all">all</button>
+        <button id="picker-none" type="button" title="select none">none</button>
+      </div>
+      <div id="picker-list"></div>
+      <div id="op-picker"></div>
+    </div>
+  </nav>
+
+  <main id="content">
+    <form id="filter-bar" autocomplete="off">
+      <label class="tick-filter">tick <input id="f-from" type="number" min="0" placeholder="from"> – <input id="f-to" type="number" min="0" placeholder="to"></label>
+      <label id="index-filter">entity index <input id="f-index" type="number" min="0" placeholder="any"></label>
+      <label id="table-filter">table <select id="f-table"></select> <input id="f-q" type="search" placeholder="search key or value"></label>
+      <label>rows <select id="f-limit"><option>50</option><option selected>100</option><option>250</option><option>500</option></select></label>
+      <button type="submit">apply</button>
+      <button type="button" id="f-reset">reset</button>
+      <span id="status" class="muted"></span>
+    </form>
+    <div id="table-wrap"><table id="results"><thead></thead><tbody></tbody></table></div>
+    <div id="pager">
+      <button id="pg-prev" type="button">‹ prev</button>
+      <span id="pg-info" class="muted"></span>
+      <button id="pg-next" type="button">next ›</button>
+    </div>
+  </main>
+
+  <aside id="detail">
+    <div id="detail-body"><p class="muted">Select a row to inspect it.</p></div>
+  </aside>
+</div>
+<script src="app.js"></script>
+</body>
+</html>

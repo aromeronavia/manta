@@ -1,0 +1,7 @@
+.git
+replays/
+data/
+*.dem
+*.bz2
+*.zst
+match-*.html

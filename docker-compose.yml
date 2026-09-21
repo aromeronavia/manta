@@ -1,0 +1,14 @@
+services:
+  manta-server:
+    build: .
+    image: manta-server
+    ports:
+      - "8080:8080"
+    volumes:
+      - manta-data:/data
+    restart: unless-stopped
+    # Add flags after the entrypoint, e.g. to keep replay files:
+    # command: ["-keep-replays"]
+
+volumes:
+  manta-data:

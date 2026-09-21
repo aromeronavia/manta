@@ -30,5 +30,20 @@ update-protobufs:
 generate:
 	go run gen/callbacks.go
 
+# Usage: make explorer REPLAY=path/to/replay.dem
+explorer:
+	go run ./cmd/manta-explorer $(REPLAY)
+
+# Usage: make map REPLAY=path/to/replay.dem
+map:
+	go run ./cmd/manta-map $(REPLAY)
+
+# Run the match-id web service locally (data in ./data)
+server:
+	go run ./cmd/manta-server
+
+docker:
+	docker build -t manta-server .
+
 sync-replays:
 	s3cmd --region=us-west-2 sync ./replays/*.dem s3://manta.dotabuff/

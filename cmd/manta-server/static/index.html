@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>manta replays</title>
+<style>
+:root { --bg: #0f1216; --panel: #161b22; --panel-2: #1c2330; --border: #2a3342; --text: #d7dde6; --muted: #8b96a8; --accent: #5cc8ff; --radiant: #23B200; --dire: #e0473a; }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+main { max-width: 900px; margin: 0 auto; padding: 40px 20px 60px; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+h1 span { color: var(--muted); font-weight: 400; }
+.lead { color: var(--muted); margin: 0 0 20px; }
+form { display: flex; gap: 8px; margin-bottom: 14px; }
+input[type=text] { flex: 1; font: inherit; font-size: 16px; padding: 10px 12px; color: var(--text); background: var(--panel-2); border: 1px solid var(--border); border-radius: 6px; font-family: ui-monospace, Menlo, monospace; }
+button { font: inherit; font-size: 15px; padding: 10px 18px; color: #0b0f14; background: var(--accent); border: 0; border-radius: 6px; cursor: pointer; font-weight: 600; }
+button:disabled { opacity: .5; cursor: default; }
+#status { min-height: 24px; color: var(--muted); margin-bottom: 24px; }
+#status.error { color: var(--dire); }
+.progress { height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden; margin-top: 8px; }
+.progress i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s; }
+.progress.indeterminate i { width: 30%; animation: slide 1.2s infinite ease-in-out; }
+@keyframes slide { 0% { margin-left: -30%; } 100% { margin-left: 100%; } }
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 24px 0 10px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; }
+.card { display: block; text-decoration: none; color: inherit; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; }
+.card:hover { border-color: var(--accent); }
+.card .id { font-family: ui-monospace, Menlo, monospace; font-size: 15px; }
+.card .meta { color: var(--muted); font-size: 12px; margin: 2px 0 8px; }
+.card .meta b { font-weight: 600; }
+.card .meta b.radiant { color: var(--radiant); }
+.card .meta b.dire { color: var(--dire); }
+.teams { display: flex; justify-content: space-between; gap: 8px; }
+.team { display: flex; gap: 3px; }
+.team img { width: 34px; height: 20px; object-fit: cover; border-radius: 3px; background: var(--panel-2); border-bottom: 2px solid var(--border); }
+.team.radiant img { border-color: var(--radiant); }
+.team.dire img { border-color: var(--dire); }
+.card.job { border-style: dashed; }
+.card.job .meta { color: var(--accent); }
+.empty { color: var(--muted); }
+footer { margin-top: 40px; color: var(--muted); font-size: 12px; }
+footer a { color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>manta replays <span>· Dota 2 match viewer</span></h1>
+  <p class="lead">Enter a match id. The replay is fetched from Valve through OpenDota, parsed, and opened on the minimap with scoreboard, farming and itemization analysis.</p>
+  <form id="form">
+    <input id="match" type="text" inputmode="numeric" pattern="[0-9]*" placeholder="match id, e.g. 9002441262" autocomplete="off" autofocus>
+    <button id="go" type="submit">Open replay</button>
+  </form>
+  <div id="status"></div>
+
+  <h2>In progress</h2>
+  <div id="jobs" class="cards"><p class="empty">nothing running</p></div>
+
+  <h2>Ready</h2>
+  <div id="matches" class="cards"><p class="empty">no matches yet</p></div>
+
+  <footer>Replays are only available from Valve for a few weeks after a match. Hero art is loaded from Valve's CDN; reference data from <a href="https://www.opendota.com">OpenDota</a>. Built on <a href="https://github.com/dotabuff/manta">manta</a>.</footer>
+</main>
+<script>
+(() => {
+  const CDN = 'https://cdn.cloudflare.steamstatic.com/apps/dota2/images';
+  const $ = id => document.getElementById(id);
+  const form = $('form'), input = $('match'), go = $('go'), status = $('status');
+  let polling = null;
+
+  const heroName = npc => (npc || '').replace(/^npc_dota_hero_/, '').split('_').map(p => p ? p[0].toUpperCase() + p.slice(1) : p).join(' ');
+  const heroImg = npc => `${CDN}/dota_react/heroes/${(npc || '').replace(/^npc_dota_hero_/, '')}.png`;
+  const fmtClock = s => { s = Math.max(0, Math.floor(s || 0)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+  const fmtMB = b => (b / 1048576).toFixed(1) + ' MB';
+
+  function el(tag, attrs, ...children) {
+    const e = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs || {})) { if (k === 'class') e.className = v; else if (k === 'text') e.textContent = v; else e.setAttribute(k, v); }
+    for (const c of children.flat()) if (c != null) e.append(c instanceof Node ? c : document.createTextNode(String(c)));
+    return e;
+  }
+
+  function setStatus(job) {
+    status.className = job.state === 'failed' ? 'error' : '';
+    status.replaceChildren();
+    if (job.state === 'failed') { status.textContent = `Match ${job.matchId}: ${job.error}`; return; }
+    let text = { queued: 'queued', resolving: 'locating the replay', downloading: 'downloading the replay', parsing: 'parsing the replay', ready: 'ready, opening…' }[job.state] || job.state;
+    if (job.message) text += ` — ${job.message}`;
+    if (job.state === 'downloading' && job.done) text += ` (${fmtMB(job.done)}${job.total > 0 ? ' of ' + fmtMB(job.total) : ''})`;
+    const bar = el('div', { class: 'progress' + (job.state === 'downloading' && job.total > 0 ? '' : ' indeterminate') }, el('i'));
+    if (job.state === 'downloading' && job.total > 0) bar.firstChild.style.width = Math.round(100 * job.done / job.total) + '%';
+    status.append(el('div', { text: `Match ${job.matchId}: ${text}` }), job.state === 'ready' ? null : bar);
+  }
+
+  async function start(id) {
+    go.disabled = true;
+    try {
+      const res = await fetch(`/api/matches/${id}`, { method: 'POST' });
+      const job = await res.json();
+      if (!res.ok) throw new Error(job.error || res.statusText);
+      track(job);
+    } catch (err) {
+      status.className = 'error'; status.textContent = err.message; go.disabled = false;
+    }
+  }
+
+  function track(job) {
+    setStatus(job);
+    if (job.state === 'ready') { location.href = job.viewer; return; }
+    if (job.state === 'failed') { go.disabled = false; refresh(); return; }
+    clearTimeout(polling);
+    polling = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/jobs/${job.matchId}`);
+        track(await res.json());
+      } catch (err) { status.className = 'error'; status.textContent = err.message; go.disabled = false; }
+    }, 1200);
+    refresh();
+  }
+
+  function teams(players) {
+    const row = el('div', { class: 'teams' });
+    for (const team of [2, 3]) {
+      const t = el('div', { class: 'team ' + (team === 2 ? 'radiant' : 'dire') });
+      for (const p of players.filter(p => p.team === team)) {
+        const im = el('img', { src: heroImg(p.hero), alt: '', title: `${heroName(p.hero)} · ${p.name}` });
+        im.addEventListener('error', () => { im.style.visibility = 'hidden'; });
+        t.append(im);
+      }
+      row.append(t);
+    }
+    return row;
+  }
+
+  async function refresh() {
+    let data;
+    try { data = await (await fetch('/api/matches')).json(); } catch { return; }
+    const jobs = $('jobs'), matches = $('matches');
+    jobs.replaceChildren(...(data.jobs.length ? data.jobs.map(j => el('a', { class: 'card job', href: '#', 'data-id': j.matchId },
+      el('div', { class: 'id', text: j.matchId }), el('div', { class: 'meta', text: j.state === 'failed' ? `failed: ${j.error}` : `${j.state}${j.message ? ' — ' + j.message : ''}` }))) : [el('p', { class: 'empty', text: 'nothing running' })]));
+    for (const a of jobs.querySelectorAll('a')) a.addEventListener('click', e => { e.preventDefault(); input.value = a.dataset.id; start(a.dataset.id); });
+    matches.replaceChildren(...(data.matches.length ? data.matches.map(m => el('a', { class: 'card', href: `/match/${m.id}/` },
+      el('div', { class: 'id', text: m.id }),
+      el('div', { class: 'meta' }, 'winner ', el('b', { class: m.winner === 2 ? 'radiant' : 'dire', text: m.winner === 2 ? 'Radiant' : m.winner === 3 ? 'Dire' : '?' }), ` · ${fmtClock(m.duration)} · map ${m.map}`),
+      teams(m.players))) : [el('p', { class: 'empty', text: 'no matches yet' })]));
+  }
+
+  form.addEventListener('submit', e => {
+    e.preventDefault();
+    const id = input.value.trim();
+    if (!/^[1-9][0-9]{0,18}$/.test(id)) { status.className = 'error'; status.textContent = 'enter a numeric match id'; return; }
+    start(id);
+  });
+
+  const preset = new URLSearchParams(location.search).get('match');
+  if (preset && /^[1-9][0-9]{0,18}$/.test(preset)) { input.value = preset; start(preset); }
+  refresh();
+  setInterval(refresh, 8000);
+})();
+</script>
+</body>
+</html>
