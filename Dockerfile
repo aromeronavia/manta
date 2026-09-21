@@ -26,6 +26,8 @@ RUN apk add --no-cache curl && mkdir -p /assets/minimap && \
 FROM gcr.io/distroless/static-debian12
 COPY --from=build /out/manta-server /manta-server
 COPY --from=assets /assets /assets
-VOLUME ["/data"]
+# No VOLUME instruction: Railway rejects it. Persist /data by mounting a
+# volume there (docker -v manta-data:/data, or a Railway Volume at /data).
+# The server creates the directory tree itself on startup.
 EXPOSE 8080
 ENTRYPOINT ["/manta-server", "-addr", "0.0.0.0:8080", "-data", "/data", "-assets", "/assets"]
