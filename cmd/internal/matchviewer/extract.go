@@ -41,6 +41,7 @@ var itemSlots = []int{0, 1, 2, 3, 4, 5, 6, 7, 8, 15, 16}
 // MatchData is the document the viewer consumes. Every per-sample array has
 // one entry per element of Ticks; absent values are -1.
 type MatchData struct {
+	Format    int            `json:"format"`
 	Match     matchInfo      `json:"match"`
 	Timing    timing         `json:"timing"`
 	Interval  uint32         `json:"interval"`
@@ -62,6 +63,14 @@ type MatchData struct {
 	FarmEvents  []farmEvent `json:"farmEvents"`
 	FarmTargets []string    `json:"farmTargets"`
 	Purchases   []purchase  `json:"purchases"`
+
+	// Hero loadouts as sparse changes: what occupies each ability slot and
+	// at what level, when cooldowns start on abilities and items, and item
+	// charge counts. See loadout.go.
+	AbilityNames []string        `json:"abilityNames"`
+	Abilities    []abilityEvent  `json:"abilities"`
+	Cooldowns    []cooldownEvent `json:"cooldowns"`
+	Charges      []chargeEvent   `json:"charges"`
 
 	// Reference is OpenDota context, embedded in exports; the server offers it
 	// separately at api/reference once fetched.
@@ -292,17 +301,20 @@ type extractor struct {
 
 	gamerules, playerResource, dataRadiant, dataDire *manta.Entity
 
-	players   map[int32]*playerTrack
-	keys      map[int32]*playerKeys
-	teamKeys  map[int32]*teamSlotKeys
-	itemIDs   map[string]int16
-	targetIDs map[string]int16
-	couriers  map[int32]*unitTrack // by entity index
-	roshan    *unitTrack
-	buildings map[int32]*building
-	wards     map[int32]*ward
-	heroOwner map[string]int32 // hero unit name -> player id
-	nameCache map[int32]string // EntityNames index -> key
+	players    map[int32]*playerTrack
+	keys       map[int32]*playerKeys
+	teamKeys   map[int32]*teamSlotKeys
+	itemIDs    map[string]int16
+	targetIDs  map[string]int16
+	abilityIDs map[string]int16
+	loadouts   map[int32]*loadout
+	gameTime   float64              // m_fGameTime at the current sample, 0 when not networked
+	couriers   map[int32]*unitTrack // by entity index
+	roshan     *unitTrack
+	buildings  map[int32]*building
+	wards      map[int32]*ward
+	heroOwner  map[string]int32 // hero unit name -> player id
+	nameCache  map[int32]string // EntityNames index -> key
 
 	// Clock calibration, resolved after the parse (see finishClocks).
 	tickInterval float64
@@ -330,30 +342,37 @@ func Extract(buf []byte, opts ExtractOptions) (*MatchData, error) {
 		p:    p,
 		opts: opts,
 		data: &MatchData{
-			Interval:    opts.Interval,
-			Players:     []*playerTrack{},
-			ItemNames:   []string{},
-			Couriers:    []*unitTrack{},
-			Buildings:   []*building{},
-			Kills:       []kill{},
-			Wards:       []*ward{},
-			Chat:        []chatLine{},
-			Events:      []chatEvent{},
-			FarmEvents:  []farmEvent{},
-			FarmTargets: []string{},
-			Purchases:   []purchase{},
+			Format:       FormatVersion,
+			Interval:     opts.Interval,
+			Players:      []*playerTrack{},
+			ItemNames:    []string{},
+			Couriers:     []*unitTrack{},
+			Buildings:    []*building{},
+			Kills:        []kill{},
+			Wards:        []*ward{},
+			Chat:         []chatLine{},
+			Events:       []chatEvent{},
+			FarmEvents:   []farmEvent{},
+			FarmTargets:  []string{},
+			Purchases:    []purchase{},
+			AbilityNames: []string{},
+			Abilities:    []abilityEvent{},
+			Cooldowns:    []cooldownEvent{},
+			Charges:      []chargeEvent{},
 		},
-		players:   make(map[int32]*playerTrack),
-		keys:      make(map[int32]*playerKeys),
-		teamKeys:  make(map[int32]*teamSlotKeys),
-		itemIDs:   make(map[string]int16),
-		targetIDs: make(map[string]int16),
-		couriers:  make(map[int32]*unitTrack),
-		roshan:    &unitTrack{Kind: "roshan", Owner: absent, X: []int32{}, Y: []int32{}, Alive: []int8{}},
-		buildings: make(map[int32]*building),
-		wards:     make(map[int32]*ward),
-		heroOwner: make(map[string]int32),
-		nameCache: make(map[int32]string),
+		players:    make(map[int32]*playerTrack),
+		keys:       make(map[int32]*playerKeys),
+		teamKeys:   make(map[int32]*teamSlotKeys),
+		itemIDs:    make(map[string]int16),
+		targetIDs:  make(map[string]int16),
+		abilityIDs: make(map[string]int16),
+		loadouts:   make(map[int32]*loadout),
+		couriers:   make(map[int32]*unitTrack),
+		roshan:     &unitTrack{Kind: "roshan", Owner: absent, X: []int32{}, Y: []int32{}, Alive: []int8{}},
+		buildings:  make(map[int32]*building),
+		wards:      make(map[int32]*ward),
+		heroOwner:  make(map[string]int32),
+		nameCache:  make(map[int32]string),
 
 		tickInterval: 1.0 / tickRate,
 	}
@@ -582,22 +601,9 @@ func (x *extractor) samplePlayer(id int32, n int) {
 	}
 	pt.Level = append(pt.Level, int8(lvl))
 
-	items := make([]int16, len(itemSlots))
-	for i, slot := range itemSlots {
-		items[i] = absent
-		h, ok := hero.GetUint32(fmt.Sprintf("m_hItems.%04d", slot))
-		if !ok || h == invalidHandle {
-			continue
-		}
-		item := x.p.FindEntityByHandle(uint64(h))
-		if item == nil {
-			continue
-		}
-		if name := x.entityName(item); name != "" {
-			items[i] = x.itemID(name)
-		}
-	}
+	items, ents := x.heroItems(hero)
 	pt.Items = append(pt.Items, items)
+	x.sampleLoadout(id, hero, items, ents)
 }
 
 // teamSlotKeys caches the team data field names for one team slot.
@@ -722,8 +728,12 @@ func (x *extractor) observeGameRules() {
 	if v, ok := getNum(g, "m_pGameRules.m_flStateTransitionTime"); ok && v > 0 {
 		x.transition = v
 	}
-	if gameTime, ok := getNum(g, "m_pGameRules.m_fGameTime"); ok && gameTime > 0 && len(x.ruleOffsets) < maxOffsetSamples {
-		x.ruleOffsets = append(x.ruleOffsets, gameTime-float64(x.p.Tick)*x.tickInterval)
+	x.gameTime = 0
+	if gameTime, ok := getNum(g, "m_pGameRules.m_fGameTime"); ok && gameTime > 0 {
+		x.gameTime = gameTime
+		if len(x.ruleOffsets) < maxOffsetSamples {
+			x.ruleOffsets = append(x.ruleOffsets, gameTime-float64(x.p.Tick)*x.tickInterval)
+		}
 	}
 }
 
@@ -777,6 +787,15 @@ func (x *extractor) finishClocks() {
 	}
 	for i := range x.data.Purchases {
 		x.data.Purchases[i].Clock = x.clockForTick(x.data.Purchases[i].Tick, offset)
+	}
+	for i := range x.data.Cooldowns {
+		c := &x.data.Cooldowns[i]
+		clock := x.clockForTick(c.Tick, offset)
+		if clock == clockUnknown {
+			c.End = clockUnknown
+			continue
+		}
+		c.End = float32(math.Round((float64(clock)+c.remaining)*10) / 10)
 	}
 }
 

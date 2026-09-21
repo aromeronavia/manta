@@ -29,6 +29,32 @@
       <div id="alerts"></div>
       <div id="kill-alerts"></div>
       <div id="map-tooltip" hidden></div>
+      <div id="map-controls">
+        <button type="button" id="zoom-in" title="zoom in (+, or scroll)">+</button>
+        <button type="button" id="zoom-out" title="zoom out (−)">−</button>
+        <button type="button" id="zoom-follow" title="follow the selected hero (F)">⌖</button>
+        <button type="button" id="zoom-reset" title="whole map (0)">⤢</button>
+      </div>
+      <div id="hero-card" hidden>
+        <button type="button" class="close" id="card-close" title="close (Esc)">×</button>
+        <div class="ident">
+          <img class="portrait" id="card-portrait" alt="" draggable="false">
+          <div class="who">
+            <div class="hero"><b id="card-hero"></b><span class="lvl" id="card-level"></span></div>
+            <div class="player" id="card-player"></div>
+            <div class="bar hp"><i id="card-hp"></i><span id="card-hp-text"></span></div>
+            <div class="bar mp"><i id="card-mp"></i><span id="card-mp-text"></span></div>
+          </div>
+        </div>
+        <div class="abilities" id="card-abilities"></div>
+        <div class="inventory">
+          <div class="grid extra" id="card-items-extra"></div>
+          <div class="bag">
+            <div class="grid main" id="card-items-main"></div>
+            <div class="grid back" id="card-items-back"></div>
+          </div>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -38,6 +64,7 @@
       <button type="button" data-panel="farm">Farming</button>
       <button type="button" data-panel="item">Itemization</button>
       <button type="button" data-panel="feed">Feed</button>
+      <button type="button" class="toggle" id="side-toggle" title="hide the panel">»</button>
     </div>
     <div id="chart-tooltip" hidden></div>
     <div id="panel-score" class="panel">

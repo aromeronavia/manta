@@ -23,6 +23,7 @@ type Store struct {
 // MatchSummary is what the landing page needs to list a match.
 type MatchSummary struct {
 	ID        int64           `json:"id"`
+	Format    int             `json:"format"`
 	Winner    int32           `json:"winner"`
 	Duration  float32         `json:"duration"`
 	Players   []PlayerSummary `json:"players"`
@@ -57,10 +58,21 @@ func (s *Store) summaryPath(id int64) string {
 	return filepath.Join(s.dir, "matches", strconv.FormatInt(id, 10)+".summary.json")
 }
 
-// Has reports whether a processed document exists for the match.
+// Has reports whether a processed document exists for the match in the
+// layout the viewer expects; older documents count as missing so that the
+// match is extracted again.
 func (s *Store) Has(id int64) bool {
-	_, err := os.Stat(s.matchPath(id))
-	return err == nil
+	if _, err := os.Stat(s.matchPath(id)); err != nil {
+		return false
+	}
+	b, err := os.ReadFile(s.summaryPath(id))
+	if err != nil {
+		return false
+	}
+	var sum struct {
+		Format int `json:"format"`
+	}
+	return json.Unmarshal(b, &sum) == nil && sum.Format == matchviewer.FormatVersion
 }
 
 // Save writes the document and its summary atomically.
@@ -124,7 +136,7 @@ func (s *Store) List() ([]MatchSummary, error) {
 }
 
 func summarize(id int64, data *matchviewer.MatchData) MatchSummary {
-	sum := MatchSummary{ID: id, Winner: data.Match.Winner, SavedAt: time.Now().UTC(), Map: data.Match.Map.ID, Reference: data.Reference != nil}
+	sum := MatchSummary{ID: id, Format: data.Format, Winner: data.Match.Winner, SavedAt: time.Now().UTC(), Map: data.Match.Map.ID, Reference: data.Reference != nil}
 	for i := len(data.Clock) - 1; i >= 0; i-- {
 		if data.Clock[i] != -32768 {
 			sum.Duration = data.Clock[i]

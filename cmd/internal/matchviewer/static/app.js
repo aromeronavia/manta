@@ -35,6 +35,8 @@
     dragging: null,
     farmPlayer: null,
     farmHeat: true,
+    view: { zoom: 1, cx: 0.5, cy: 0.5, follow: false },
+    sideCollapsed: false,
   };
   const els = {};
   const images = new Map();
@@ -42,6 +44,7 @@
   let series = null;
   let feedEntries = [];
   let roshanDeaths = [];
+  let loadouts = new Map(); // player id -> ability, cooldown and charge events
 
   // ---- helpers -----------------------------------------------------------------
 
@@ -203,6 +206,12 @@
       }
     }
 
+    loadouts = new Map();
+    for (const p of M.players) loadouts.set(p.id, { abilities: [], cooldowns: [], charges: [] });
+    for (const e of M.abilities || []) { const L = loadouts.get(e.player); if (L) L.abilities.push(e); }
+    for (const c of M.cooldowns || []) { const L = loadouts.get(c.player); if (L) L.cooldowns.push(c); }
+    for (const c of M.charges || []) { const L = loadouts.get(c.player); if (L) L.charges.push(c); }
+
     feedEntries = [];
     for (const k of M.kills) feedEntries.push({ kind: 'kill', tick: k.tick, clock: k.clock, k });
     for (const c of M.chat) feedEntries.push({ kind: 'chat', tick: c.tick, clock: c.clock, c });
@@ -230,24 +239,96 @@
 
   // ---- map ---------------------------------------------------------------------
 
-  let mapSize = 0;
+  // The canvas fills the map pane. The map is a square of side mapSize × zoom
+  // centred on (cx, cy) in normalised map coordinates: letterboxed at 1×,
+  // covering the canvas once zoomed in.
+  let mapSize = 0, mapW = 0, mapH = 0;
+  const ZOOM_MIN = 1, ZOOM_MAX = 8, FOLLOW_ZOOM = 3, ZOOM_STEP = 1.5;
 
   function resizeMap() {
     const pane = $('map-pane');
-    const size = Math.max(200, Math.min(pane.clientWidth, pane.clientHeight) - 20);
+    const w = Math.max(200, pane.clientWidth - 20), hgt = Math.max(200, pane.clientHeight - 20);
     const dpr = window.devicePixelRatio || 1;
     const c = els.map;
-    if (mapSize !== size || c.width !== Math.round(size * dpr)) {
-      mapSize = size;
-      c.width = Math.round(size * dpr);
-      c.height = Math.round(size * dpr);
-      c.style.width = c.style.height = size + 'px';
+    if (mapW !== w || mapH !== hgt || c.width !== Math.round(w * dpr)) {
+      mapW = w; mapH = hgt; mapSize = Math.min(w, hgt);
+      c.width = Math.round(w * dpr);
+      c.height = Math.round(hgt * dpr);
+      c.style.width = w + 'px'; c.style.height = hgt + 'px';
+      clampView();
     }
   }
 
-  function project(x, y) {
+  // World units to the unit square: (0,0) top-left, (1,1) bottom-right.
+  function norm(x, y) {
     const s = M.match.map.size;
-    return [(x - MAP_CENTER) / s * mapSize + mapSize / 2, mapSize / 2 - (y - MAP_CENTER) / s * mapSize];
+    return [(x - MAP_CENTER) / s + 0.5, 0.5 - (y - MAP_CENTER) / s];
+  }
+  // World units to canvas pixels through the camera.
+  function project(x, y) {
+    const [u, v] = norm(x, y);
+    const k = state.view.zoom * mapSize;
+    return [(u - state.view.cx) * k + mapW / 2, (v - state.view.cy) * k + mapH / 2];
+  }
+  // World units to pixels of the unzoomed map square, for cached layers.
+  function baseProject(x, y) {
+    const [u, v] = norm(x, y);
+    return [u * mapSize, v * mapSize];
+  }
+  // Where the map square sits on the canvas: left, top, side.
+  function mapRect() {
+    const k = state.view.zoom * mapSize;
+    return [mapW / 2 - state.view.cx * k, mapH / 2 - state.view.cy * k, k];
+  }
+  // Keeps the camera on the map: centred along an axis the map does not fill,
+  // otherwise never looking past an edge.
+  function clampView() {
+    const v = state.view;
+    v.zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, v.zoom));
+    const k = v.zoom * mapSize;
+    v.cx = k <= mapW ? 0.5 : Math.min(1 - mapW / (2 * k), Math.max(mapW / (2 * k), v.cx));
+    v.cy = k <= mapH ? 0.5 : Math.min(1 - mapH / (2 * k), Math.max(mapH / (2 * k), v.cy));
+  }
+  // Zooms by factor, keeping the map point under canvas pixel (mx, my) still.
+  function zoomAt(factor, mx = mapW / 2, my = mapH / 2) {
+    const v = state.view;
+    const k0 = v.zoom * mapSize;
+    const u = v.cx + (mx - mapW / 2) / k0, w = v.cy + (my - mapH / 2) / k0;
+    v.zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, v.zoom * factor));
+    const k1 = v.zoom * mapSize;
+    v.cx = u - (mx - mapW / 2) / k1;
+    v.cy = w - (my - mapH / 2) / k1;
+    clampView();
+  }
+  function resetView() {
+    state.view.zoom = 1; state.view.cx = state.view.cy = 0.5; state.view.follow = false;
+    updateMapControls();
+  }
+  // Locks the camera on the selected hero, zooming in if the map is still whole.
+  function setFollow(on) {
+    state.view.follow = on && state.selected != null;
+    if (state.view.follow && state.view.zoom < FOLLOW_ZOOM) state.view.zoom = FOLLOW_ZOOM;
+    updateMapControls();
+  }
+  function followSelected(idx) {
+    if (!state.view.follow) return;
+    const p = playerById(state.selected);
+    if (!p) { setFollow(false); return; }
+    const pos = posAt(p.x, p.y, idx);
+    if (!pos) return;
+    const [u, v] = norm(pos.x, pos.y);
+    const view = state.view;
+    const dx = u - view.cx, dy = v - view.cy;
+    // Ease toward the hero; snap after a seek or teleport.
+    const a = Math.hypot(dx, dy) * view.zoom > 0.5 ? 1 : 0.2;
+    view.cx += dx * a; view.cy += dy * a;
+    clampView();
+  }
+  function updateMapControls() {
+    const follow = $('zoom-follow');
+    follow.classList.toggle('active', state.view.follow);
+    follow.disabled = state.selected == null;
+    follow.title = state.selected == null ? 'select a hero to follow it' : (state.view.follow ? 'stop following (F)' : 'follow the selected hero (F)');
   }
 
   function drawSchematic(ctx) {
@@ -279,20 +360,25 @@
 
   function drawMap(now = performance.now()) {
     resizeMap();
+    const tick = state.tick;
+    const idx = idxFor(tick);
+    followSelected(idx);
     const c = els.map;
     const ctx = c.getContext('2d');
     const dpr = window.devicePixelRatio || 1;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, mapSize, mapSize);
+    ctx.fillStyle = '#0b0f14';
+    ctx.fillRect(0, 0, mapW, mapH);
 
+    const [ox, oy, k] = mapRect();
     if (minimapImg && minimapImg.complete && minimapImg.naturalWidth) {
-      ctx.drawImage(minimapImg, 0, 0, mapSize, mapSize);
+      ctx.drawImage(minimapImg, ox, oy, k, k);
     } else {
+      ctx.save();
+      ctx.translate(ox, oy); ctx.scale(k / mapSize, k / mapSize);
       drawSchematic(ctx);
+      ctx.restore();
     }
-
-    const tick = state.tick;
-    const idx = idxFor(tick);
     const L = state.layers;
 
     if (L.wards) drawWards(ctx, tick);
@@ -701,6 +787,7 @@
   }
 
   function drawCharts() {
+    if (state.sideCollapsed) return;
     if (state.panel !== 'score') return;
     drawChart(els.chartGold, series.gold, 'gold');
     drawChart(els.chartXp, series.xp, 'XP');
@@ -799,6 +886,8 @@
       const row = scoreRows.get(p.id);
       if (row) row.tr.classList.toggle('selected', state.selected === p.id);
     }
+    if (state.selected == null) state.view.follow = false;
+    updateMapControls();
   }
 
   // ---- feed --------------------------------------------------------------------
@@ -1136,6 +1225,7 @@
   }
 
   function drawFarmCharts(i) {
+    if (state.sideCollapsed) return;
     if (state.panel !== 'farm' || state.farmPlayer == null) return;
     const d = farmDerived(state.farmPlayer);
     drawCSChart($('chart-cs'), d);
@@ -1494,7 +1584,7 @@
       for (const e of d.events) {
         if (e.tick > tick) break;
         if (e.x === ABSENT) continue;
-        const [px, py] = project(e.x, e.y);
+        const [px, py] = baseProject(e.x, e.y);
         const grad = g.createRadialGradient(px, py, 0, px, py, r);
         grad.addColorStop(0, 'rgba(255, 150, 40, 0.28)');
         grad.addColorStop(1, 'rgba(255, 150, 40, 0)');
@@ -1503,7 +1593,8 @@
       }
       heatCache = { key, canvas: c };
     }
-    ctx.drawImage(heatCache.canvas, 0, 0, mapSize, mapSize);
+    const [ox, oy, k] = mapRect();
+    ctx.drawImage(heatCache.canvas, ox, oy, k, k);
     for (const e of d.events) {
       if (e.tick > tick) break;
       if (e.x === ABSENT) continue;
@@ -1663,6 +1754,7 @@
     $('clock').textContent = fmtClock(clockAt(state.tick));
     $('tick').textContent = `tick ${fmtNum(Math.round(state.tick))}`;
     updateHUD(idx);
+    updateHeroCard(idx);
     if (idx.i !== state.lastPanelIdx) {
       state.lastPanelIdx = idx.i;
       updateScoreboard(idx.i);
@@ -1683,6 +1775,7 @@
   const HUD_NATURAL_WIDTH = 780;
   const hudLast = { radiant: null, dire: null, clock: null, night: null, turn: null, scale: null };
   const hudPortraits = new Map();
+  let hudNaturalWidth = 0; // layout width of the HUD before scaling
 
   function heroLandscapeURL(npc) { return `${CDN}/dota_react/heroes/${heroShort(npc)}.png`; }
 
@@ -1699,14 +1792,31 @@
         const el = h('div', { class: 'portrait', title: `${heroName(p.hero)} · ${p.name}`, onclick: () => { state.selected = state.selected === p.id ? null : p.id; refreshSelection(); } },
           h('span', { class: 'strip', style: `background:${p.color}` }), im,
           h('span', { class: 'lvl' }), h('span', { class: 'respawn' }),
-          h('div', { class: 'bar hp' }, h('i')), h('div', { class: 'bar mp' }, h('i')));
+          h('div', { class: 'bar hp' }, h('i')), h('div', { class: 'bar mp' }, h('i')),
+          h('div', { class: 'stats' }, h('span', { class: 'lh', title: 'last hits / denies' }), h('span', { class: 'nw', title: 'net worth and its rank' }), h('span', { class: 'kda', title: 'kills / deaths / assists' })));
         wrap.append(el);
-        hudPortraits.set(p.id, { el, lvl: el.querySelector('.lvl'), respawn: el.querySelector('.respawn'), hp: el.querySelector('.bar.hp i'), mp: el.querySelector('.bar.mp i'), last: {} });
+        hudPortraits.set(p.id, {
+          el, lvl: el.querySelector('.lvl'), respawn: el.querySelector('.respawn'), hp: el.querySelector('.bar.hp i'), mp: el.querySelector('.bar.mp i'),
+          lh: el.querySelector('.lh'), nw: el.querySelector('.nw'), kda: el.querySelector('.kda'), last: {},
+        });
       }
     }
+    hudNaturalWidth = $('hud').offsetWidth;
+  }
+
+  // Players ranked by net worth at a sample, 1 being the richest.
+  let rankCache = { i: -1, ranks: new Map() };
+  function netWorthRanks(i) {
+    if (rankCache.i === i) return rankCache.ranks;
+    const sorted = M.players.filter(p => p.netWorth[i] != null && p.netWorth[i] !== ABSENT).sort((a, b) => b.netWorth[i] - a.netWorth[i]);
+    const ranks = new Map();
+    sorted.forEach((p, r) => ranks.set(p.id, r + 1));
+    rankCache = { i, ranks };
+    return ranks;
   }
 
   function updateHUDHeroes(i) {
+    const ranks = netWorthRanks(i);
     for (const p of M.players) {
       const hp = hudPortraits.get(p.id);
       if (!hp) continue;
@@ -1723,6 +1833,15 @@
       if (L.mana !== manaW) { L.mana = manaW; hp.mp.style.width = manaW + '%'; }
       const rs = dead && respawn != null && respawn > 0 ? String(respawn) : (dead ? '☠' : '');
       if (L.respawn !== rs) { L.respawn = rs; hp.respawn.textContent = rs; }
+
+      const stat = v => (v == null || v === ABSENT ? '–' : v);
+      const lh = p.lastHits ? `${stat(p.lastHits[i])}/${stat(p.denies[i])}` : '';
+      if (L.lh !== lh) { L.lh = lh; hp.lh.textContent = lh; }
+      const nw = p.netWorth[i], rank = ranks.get(p.id);
+      const nwTxt = nw == null || nw === ABSENT ? '' : `${fmtK(nw)} #${rank}`;
+      if (L.nw !== nwTxt) { L.nw = nwTxt; clear(hp.nw); if (nwTxt) hp.nw.append(fmtK(nw), h('b', { text: `#${rank}` })); }
+      const kda = p.kills[i] == null || p.kills[i] === ABSENT ? '' : `${p.kills[i]}/${p.deaths[i]}/${p.assists[i]}`;
+      if (L.kda !== kda) { L.kda = kda; hp.kda.textContent = kda; }
     }
   }
 
@@ -1760,13 +1879,182 @@
     const turn = Math.round(((dn.turn % 1) + 1) % 1 * 100);
     if (turn !== hudLast.turn) { hudLast.turn = turn; $('hud-dial').style.setProperty('--turn', `${turn}%`); }
     updateHUDHeroes(i);
-    const scale = Math.min(1, Math.round(100 * (mapSize - 16) / HUD_NATURAL_WIDTH) / 100);
+    const scale = Math.min(1, Math.round(100 * (mapW - 16) / (hudNaturalWidth || HUD_NATURAL_WIDTH)) / 100);
     if (scale !== hudLast.scale) { hudLast.scale = scale; $('hud').style.setProperty('--hud-scale', scale); }
+  }
+
+  // ---- hero card ---------------------------------------------------------------
+
+  // The selected hero's abilities and inventory with live cooldowns and
+  // charges, read from the sparse loadout events: the state at a tick is the
+  // last event per slot at or before it.
+  const card = { player: null, abilityKey: null, abilities: [], items: [], last: {} };
+  const ITEM_GRID = { extra: [10, 9], main: [0, 1, 2, 3, 4, 5], back: [6, 7, 8] }; // indexes into items[]
+
+  function abilityIconURL(name) { return `${CDN}/dota_react/abilities/${name}.png`; }
+  function abilityLabel(name, hero) {
+    const prefix = heroShort(hero) + '_';
+    return (name.startsWith(prefix) ? name.slice(prefix.length) : name).replace(/_/g, ' ');
+  }
+  function abilitiesAt(L, tick) {
+    const slots = new Map();
+    for (const e of L.abilities) {
+      if (e.tick > tick) break;
+      if (e.name === ABSENT) slots.delete(e.slot); else slots.set(e.slot, e);
+    }
+    return [...slots.values()].sort((a, b) => a.slot - b.slot).map(e => ({ slot: e.slot, name: M.abilityNames[e.name], level: e.level }));
+  }
+  function cooldownsAt(L, tick, kind) {
+    const out = new Map();
+    for (const c of L.cooldowns) { if (c.tick > tick) break; if (c.kind === kind) out.set(c.slot, c); }
+    return out;
+  }
+  function chargesAt(L, tick) {
+    const out = new Map();
+    for (const c of L.charges) { if (c.tick > tick) break; out.set(c.slot, c.charges); }
+    return out;
+  }
+
+  // A slot: icon with a text fallback, cooldown sweep and timer, charge badge.
+  function makeSlot(extraClass) {
+    const im = h('img', { alt: '', draggable: 'false' });
+    const slot = {
+      el: h('div', { class: `slot ${extraClass || ''}` }, im, h('span', { class: 'name' }), h('div', { class: 'cd' }), h('div', { class: 'cdt' }), h('span', { class: 'charges' })),
+      img: im, url: undefined, cooling: null, txt: null, frac: null, charges: null,
+    };
+    slot.name = slot.el.querySelector('.name'); slot.cd = slot.el.querySelector('.cd'); slot.cdt = slot.el.querySelector('.cdt'); slot.badge = slot.el.querySelector('.charges');
+    im.addEventListener('error', () => { im.style.visibility = 'hidden'; slot.name.hidden = false; });
+    return slot;
+  }
+  function setSlotIcon(slot, url, label) {
+    if (slot.url === url) return;
+    slot.url = url;
+    slot.el.classList.toggle('empty', !url);
+    slot.el.title = label || '';
+    slot.name.textContent = label || '';
+    slot.name.hidden = !!url;
+    if (url) { slot.img.style.visibility = ''; slot.img.src = url; } else { slot.img.removeAttribute('src'); slot.img.style.visibility = 'hidden'; }
+  }
+  // c is the slot's latest cooldown event; the sweep shows the share left.
+  function setSlotCooldown(slot, c, clock, present) {
+    let remaining = 0, frac = 0;
+    if (present && c && clock != null && c.end !== CLOCK_UNKNOWN) {
+      remaining = c.end - clock;
+      if (remaining > 0) frac = c.len > 0 ? Math.min(1, remaining / c.len) : 1;
+    }
+    const cooling = remaining > 0.05;
+    if (slot.cooling !== cooling) { slot.cooling = cooling; slot.el.classList.toggle('cooling', cooling); }
+    if (!cooling) return;
+    const txt = remaining >= 10 ? String(Math.ceil(remaining)) : remaining.toFixed(1);
+    if (txt !== slot.txt) { slot.txt = txt; slot.cdt.textContent = txt; }
+    const f = Math.round(frac * 50) / 50;
+    if (f !== slot.frac) { slot.frac = f; slot.cd.style.setProperty('--frac', f); }
+  }
+  function setSlotCharges(slot, n) {
+    const txt = n != null && n !== ABSENT ? String(n) : '';
+    if (txt !== slot.charges) { slot.charges = txt; slot.badge.textContent = txt; }
+  }
+
+  function buildHeroCard() {
+    card.items = [];
+    for (const [grid, indexes] of Object.entries(ITEM_GRID)) {
+      const wrap = clear($(`card-items-${grid}`));
+      for (const s of indexes) {
+        const slot = makeSlot(s === 10 ? 'neutral' : s === 9 ? 'tp' : '');
+        slot.index = s;
+        wrap.append(slot.el);
+        card.items.push(slot);
+      }
+    }
+    $('card-portrait').addEventListener('error', e => { e.target.style.visibility = 'hidden'; });
+  }
+
+  function updateHeroCard(idx) {
+    const el = $('hero-card');
+    const p = state.selected != null ? playerById(state.selected) : null;
+    if (!p) {
+      if (!el.hidden) { el.hidden = true; card.player = null; }
+      return;
+    }
+    if (card.player !== p.id) {
+      card.player = p.id; card.abilityKey = null; card.last = {};
+      for (const slot of card.items) slot.url = undefined;
+      const portrait = $('card-portrait');
+      portrait.style.visibility = ''; portrait.src = heroLandscapeURL(p.hero);
+      $('card-hero').textContent = heroName(p.hero);
+      $('card-player').textContent = p.name;
+      el.style.setProperty('--team', p.color);
+      el.hidden = false;
+    }
+    const i = idx.i, clock = clockAt(state.tick), L = loadouts.get(p.id), last = card.last;
+    const level = p.level[i], hp = p.hp[i], mana = p.mana ? p.mana[i] : ABSENT, dead = p.alive[i] === 0;
+    const lvl = level != null && level !== ABSENT ? `Lv ${level}` : '';
+    if (lvl !== last.lvl) { last.lvl = lvl; $('card-level').textContent = lvl; }
+    if (dead !== last.dead) { last.dead = dead; el.classList.toggle('dead', dead); }
+    const hpTxt = dead ? 'dead' : (hp == null || hp === ABSENT ? '' : `${hp}% hp`);
+    if (hpTxt !== last.hp) { last.hp = hpTxt; $('card-hp').style.width = (dead || hp == null || hp === ABSENT ? 0 : hp) + '%'; $('card-hp-text').textContent = hpTxt; }
+    const mpTxt = dead || mana == null || mana === ABSENT ? '' : `${mana}% mana`;
+    if (mpTxt !== last.mp) { last.mp = mpTxt; $('card-mp').style.width = (mpTxt ? mana : 0) + '%'; $('card-mp-text').textContent = mpTxt; }
+
+    const abilities = L ? abilitiesAt(L, state.tick) : [];
+    const key = abilities.map(a => `${a.slot}:${a.name}`).join('|');
+    if (key !== card.abilityKey) {
+      card.abilityKey = key;
+      const wrap = clear($('card-abilities'));
+      card.abilities = abilities.map(a => {
+        const slot = makeSlot('');
+        slot.slot = a.slot; slot.level = null;
+        slot.pips = h('div', { class: 'pips' });
+        setSlotIcon(slot, abilityIconURL(a.name), abilityLabel(a.name, p.hero));
+        wrap.append(h('div', { class: 'ability' }, slot.el, slot.pips));
+        return slot;
+      });
+      if (!abilities.length) wrap.append(h('div', { class: 'muted small none', text: L && L.abilities.length ? 'no abilities yet' : 'no ability data for this match' }));
+    }
+    const abilityCDs = L ? cooldownsAt(L, state.tick, 'ability') : new Map();
+    for (const slot of card.abilities) {
+      const a = abilities.find(x => x.slot === slot.slot);
+      const level = a ? a.level : 0;
+      if (level !== slot.level) {
+        slot.level = level;
+        slot.el.classList.toggle('unlearned', level === 0);
+        clear(slot.pips);
+        for (let k = 0; k < level; k++) slot.pips.append(h('i'));
+      }
+      setSlotCooldown(slot, abilityCDs.get(slot.slot), clock, level > 0);
+    }
+
+    const items = p.items[i] || [];
+    const itemCDs = L ? cooldownsAt(L, state.tick, 'item') : new Map();
+    const charges = L ? chargesAt(L, state.tick) : new Map();
+    for (const slot of card.items) {
+      const id = items[slot.index];
+      const name = id != null && id !== ABSENT ? M.itemNames[id] : null;
+      setSlotIcon(slot, itemIconURL(name), name ? itemLabel(name) : '');
+      setSlotCooldown(slot, itemCDs.get(slot.index), clock, !!name);
+      setSlotCharges(slot, name ? charges.get(slot.index) : null);
+    }
+  }
+
+  // ---- sidebar -----------------------------------------------------------------
+
+  const SIDE_KEY = 'manta-map.side';
+  function setSideCollapsed(on) {
+    state.sideCollapsed = on;
+    $('layout').classList.toggle('side-collapsed', on);
+    const b = $('side-toggle');
+    b.textContent = on ? '«' : '»';
+    b.title = on ? 'show the panel' : 'hide the panel';
+    try { localStorage.setItem(SIDE_KEY, on ? 'collapsed' : 'open'); } catch (err) { /* storage unavailable */ }
+    if (!on) requestAnimationFrame(() => { drawCharts(); if (state.panel === 'farm') drawFarmCharts(idxFor(state.tick).i); });
+  }
+  function readSideCollapsed() {
+    try { return localStorage.getItem(SIDE_KEY) === 'collapsed'; } catch (err) { return false; }
   }
 
   function switchPanel(name) {
     state.panel = name;
-    for (const b of document.querySelectorAll('#panel-tabs button')) b.classList.toggle('active', b.dataset.panel === name);
+    for (const b of document.querySelectorAll('#panel-tabs button[data-panel]')) b.classList.toggle('active', b.dataset.panel === name);
     for (const p of document.querySelectorAll('.panel')) p.hidden = p.id !== `panel-${name}`;
     if (name === 'score') drawCharts();
     if (name === 'feed') updateFeed(true);
@@ -1786,22 +2074,73 @@
     for (const cb of document.querySelectorAll('#layers input[type=checkbox]')) {
       cb.addEventListener('change', () => { state.layers[cb.dataset.layer] = cb.checked; });
     }
-    for (const b of document.querySelectorAll('#panel-tabs button')) b.addEventListener('click', () => switchPanel(b.dataset.panel));
+    for (const b of document.querySelectorAll('#panel-tabs button[data-panel]')) b.addEventListener('click', () => switchPanel(b.dataset.panel));
 
     const tl = els.timeline;
     tl.addEventListener('pointerdown', e => { state.dragging = 'timeline'; tl.setPointerCapture(e.pointerId); seekToTimelineX(e.clientX); });
     tl.addEventListener('pointermove', e => { if (state.dragging === 'timeline') seekToTimelineX(e.clientX); });
     tl.addEventListener('pointerup', () => { state.dragging = null; });
 
+    // Map: click selects a hero (empty ground clears), drag pans, wheel zooms,
+    // double-click follows.
     const map = els.map;
-    map.addEventListener('pointermove', e => { const r = map.getBoundingClientRect(); state.hover = { x: e.clientX - r.left, y: e.clientY - r.top }; });
-    map.addEventListener('pointerleave', () => { state.hover = null; });
-    map.addEventListener('click', e => {
-      const r = map.getBoundingClientRect();
-      const p = heroAtPoint(e.clientX - r.left, e.clientY - r.top, idxFor(state.tick));
-      state.selected = p && state.selected !== p.id ? p.id : null;
-      refreshSelection();
+    let pan = null; // { id, x, y, moved } while the primary button is down
+    const mapPoint = e => { const r = map.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
+    map.addEventListener('pointerdown', e => {
+      if (e.button !== 0) return;
+      pan = { id: e.pointerId, x: e.clientX, y: e.clientY, moved: false };
+      map.setPointerCapture(e.pointerId);
     });
+    map.addEventListener('pointermove', e => {
+      state.hover = mapPoint(e);
+      if (!pan || pan.id !== e.pointerId) return;
+      const dx = e.clientX - pan.x, dy = e.clientY - pan.y;
+      if (!pan.moved) {
+        if (Math.hypot(dx, dy) < 4) return;
+        pan.moved = true;
+        map.classList.add('panning');
+        if (state.view.follow) setFollow(false);
+      }
+      const k = state.view.zoom * mapSize;
+      state.view.cx -= dx / k; state.view.cy -= dy / k;
+      clampView();
+      pan.x = e.clientX; pan.y = e.clientY;
+    });
+    const endPan = e => {
+      if (!pan || pan.id !== e.pointerId) return;
+      const moved = pan.moved;
+      pan = null;
+      map.classList.remove('panning');
+      if (moved || e.type !== 'pointerup') return;
+      const { x, y } = mapPoint(e);
+      const p = heroAtPoint(x, y, idxFor(state.tick));
+      state.selected = p ? p.id : null;
+      refreshSelection();
+    };
+    map.addEventListener('pointerup', endPan);
+    map.addEventListener('pointercancel', endPan);
+    map.addEventListener('pointerleave', () => { state.hover = null; });
+    map.addEventListener('dblclick', e => {
+      const { x, y } = mapPoint(e);
+      const p = heroAtPoint(x, y, idxFor(state.tick));
+      if (!p) return;
+      state.selected = p.id;
+      refreshSelection();
+      setFollow(true);
+    });
+    map.addEventListener('wheel', e => {
+      e.preventDefault();
+      const dy = e.deltaMode === 1 ? e.deltaY * 33 : e.deltaY;
+      const { x, y } = mapPoint(e);
+      zoomAt(Math.pow(1.0015, -dy), x, y);
+    }, { passive: false });
+
+    $('zoom-in').addEventListener('click', () => zoomAt(ZOOM_STEP));
+    $('zoom-out').addEventListener('click', () => zoomAt(1 / ZOOM_STEP));
+    $('zoom-follow').addEventListener('click', () => setFollow(!state.view.follow));
+    $('zoom-reset').addEventListener('click', resetView);
+    $('card-close').addEventListener('click', () => { state.selected = null; refreshSelection(); });
+    $('side-toggle').addEventListener('click', () => setSideCollapsed(!state.sideCollapsed));
 
     $('farm-heat').addEventListener('change', e => { state.farmHeat = e.target.checked; });
     for (const canvas of [els.chartGold, els.chartXp, $('chart-cs'), $('chart-gpm'), $('chart-gold-src')]) {
@@ -1821,6 +2160,11 @@
       if (e.code === 'Space') { e.preventDefault(); setPlaying(!state.playing); }
       else if (e.code === 'ArrowRight') { e.preventDefault(); setTick(state.tick + step); }
       else if (e.code === 'ArrowLeft') { e.preventDefault(); setTick(state.tick - step); }
+      else if (e.code === 'KeyF') { setFollow(!state.view.follow); }
+      else if (e.code === 'Escape') { state.selected = null; refreshSelection(); }
+      else if (e.code === 'Equal' || e.code === 'NumpadAdd') { zoomAt(ZOOM_STEP); }
+      else if (e.code === 'Minus' || e.code === 'NumpadSubtract') { zoomAt(1 / ZOOM_STEP); }
+      else if (e.code === 'Digit0') { resetView(); }
     });
     window.addEventListener('resize', () => { drawCharts(); });
   }
@@ -1846,6 +2190,9 @@
     buildScoreboard();
     buildFarmPicker();
     buildHUDHeroes();
+    buildHeroCard();
+    setSideCollapsed(readSideCollapsed());
+    updateMapControls();
     setTick(tickForClock(0));
     applyHash();
     updateFeed(true);
@@ -1853,7 +2200,7 @@
     requestAnimationFrame(frame);
   }
 
-  // #t=12:34&panel=graph&speed=8&play=1&select=3 opens the viewer at a moment.
+  // #t=12:34&panel=graph&speed=8&play=1&select=3&follow=1 opens the viewer at a moment.
   function applyHash() {
     const params = new URLSearchParams(location.hash.replace(/^#/, ''));
     const t = params.get('t');
@@ -1870,6 +2217,7 @@
     if (hero != null && playerById(parseInt(hero, 10))) setFarmPlayer(parseInt(hero, 10));
     const sel = params.get('select');
     if (sel != null && playerById(parseInt(sel, 10))) { state.selected = parseInt(sel, 10); refreshSelection(); }
+    if (params.get('follow') === '1') setFollow(true);
     if (params.get('play') === '1') setPlaying(true);
   }
 

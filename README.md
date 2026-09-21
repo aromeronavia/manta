@@ -113,6 +113,14 @@ panels, and can write the whole viewer to one self-contained HTML file.
   barracks and ancients (greyed once destroyed), observer and sentry wards,
   couriers and Roshan. Kill banners and item purchase alerts pop up as the
   playhead crosses them, like the in-game notices. Layers toggle individually.
+- **Camera**: scroll to zoom from 1× to 8× around the cursor, drag to pan, and
+  double-click a hero (or press F with one selected) to lock the camera on it
+  as it moves. Buttons in the map's corner zoom, follow and reset; `0` resets.
+- **Hero card**: click a hero on the map, in the top bar or in the scoreboard
+  for its loadout as the in-game HUD shows it: abilities with level pips and
+  cooldown sweeps counting down, and the inventory, backpack, teleport scroll
+  and neutral item with their cooldowns and charge counts. Escape or × closes
+  it.
 - **Scoreboard**: level, K/D/A, net worth and items per player, with net worth
   and experience advantage charts you can click to seek.
 - **Farming**: one hero at the playhead: GPM, XPM, last hits (with the
@@ -132,7 +140,10 @@ panels, and can write the whole viewer to one self-contained HTML file.
 A Dota-style top bar sits over the map: both teams' hero portraits with colour
 strip, health, mana, level and respawn countdown flank the kill counts, the
 game clock and the day/night dial (driven by the replay's own time-of-day
-counter). Clicking a portrait selects that hero.
+counter). Under each portrait: last hits/denies, net worth with its rank among
+the ten players, and K/D/A. Clicking a portrait selects that hero. The » button
+in the tab row collapses the side panel so the map can have the whole window;
+the choice is remembered in the browser.
 
     manta-map [flags] replay.dem             # then open http://127.0.0.1:8081
     manta-map -out match.html replay.dem     # write one self-contained HTML file
@@ -156,8 +167,9 @@ request per second (roughly a minute and a half for ten heroes with timings),
 later runs are served from the cache.
 
 The viewer accepts URL parameters to open at a moment:
-`#t=12:34&panel=farm&hero=5&select=3&speed=8&play=1` (`panel` is `score`,
-`farm`, `item` or `feed`; `hero` and `select` are player ids).
+`#t=12:34&panel=farm&hero=5&select=3&follow=1&speed=8&play=1` (`panel` is
+`score`, `farm`, `item` or `feed`; `hero` and `select` are player ids;
+`follow=1` locks the camera on the selected hero).
 
 ### manta-server: the viewer as a web service
 
